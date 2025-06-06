@@ -19,7 +19,7 @@ torch.manual_seed(123)
 torch.cuda.manual_seed_all(123)
 
 from utils import to_gpu, time_desc_decorator, DiffLoss, MSE, SIMSE, CMD
-import models
+import models as models_MISA
 
 
 class Solver(object):
@@ -37,7 +37,7 @@ class Solver(object):
     def build(self, cuda=True):
 
         if self.model is None:
-            self.model = getattr(models, self.train_config.model)(self.train_config)
+            self.model = getattr(models_MISA, self.train_config.model)(self.train_config)
         
         # Final list
         for name, param in self.model.named_parameters():
@@ -94,6 +94,10 @@ class Solver(object):
         
         train_losses = []
         valid_losses = []
+        # 添加新的损失跟踪列表
+        train_loss_st = []  # 时空解耦损失
+        train_loss_modal = []  # 模态对齐损失
+        
         for e in range(self.train_config.n_epoch):
             self.model.train()
 
@@ -101,6 +105,10 @@ class Solver(object):
             train_loss_recon = []
             train_loss_sp = []
             train_loss = []
+            # 初始化新损失的跟踪列表
+            train_loss_st = []  
+            train_loss_modal = []
+            
             for batch in self.train_data_loader:
                 self.model.zero_grad()
                 t, v, a, y, l, bert_sent, bert_sent_type, bert_sent_mask = batch
@@ -110,7 +118,7 @@ class Solver(object):
                 v = to_gpu(v)
                 a = to_gpu(a)
                 y = to_gpu(y)
-                l = to_gpu(l)
+                # l = to_gpu(l)  # 保持在CPU
                 bert_sent = to_gpu(bert_sent)
                 bert_sent_type = to_gpu(bert_sent_type)
                 bert_sent_mask = to_gpu(bert_sent_mask)
@@ -126,15 +134,22 @@ class Solver(object):
                 recon_loss = self.get_recon_loss()
                 cmd_loss = self.get_cmd_loss()
                 
+                # 计算新增损失
+                st_loss = self.get_spatiotemporal_loss()  # 时空解耦损失
+                modal_align_loss = self.get_modal_alignment_loss()  # 模态对齐损失
+                
                 if self.train_config.use_cmd_sim:
                     similarity_loss = cmd_loss
                 else:
                     similarity_loss = domain_loss
                 
+                # 更新总损失函数，加入新的损失项
                 loss = cls_loss + \
                     self.train_config.diff_weight * diff_loss + \
                     self.train_config.sim_weight * similarity_loss + \
-                    self.train_config.recon_weight * recon_loss
+                    self.train_config.recon_weight * recon_loss + \
+                    self.train_config.st_weight * st_loss + \
+                    self.train_config.modal_weight * modal_align_loss
 
                 loss.backward()
                 
@@ -146,10 +161,15 @@ class Solver(object):
                 train_loss_recon.append(recon_loss.item())
                 train_loss.append(loss.item())
                 train_loss_sim.append(similarity_loss.item())
+                # 记录新损失
+                train_loss_st.append(st_loss.item())
+                train_loss_modal.append(modal_align_loss.item())
                 
 
             train_losses.append(train_loss)
+            # 打印额外的损失信息
             print(f"Training loss: {round(np.mean(train_loss), 4)}")
+            print(f"ST loss: {round(np.mean(train_loss_st), 4)}, Modal loss: {round(np.mean(train_loss_modal), 4)}")
 
             valid_loss, valid_acc = self.eval(mode="dev")
             
@@ -167,8 +187,8 @@ class Solver(object):
                     print("Running out of patience, loading previous best model.")
                     num_trials -= 1
                     curr_patience = patience
-                    self.model.load_state_dict(torch.load(f'checkpoints/model_{self.train_config.name}.std'))
-                    self.optimizer.load_state_dict(torch.load(f'checkpoints/optim_{self.train_config.name}.std'))
+                    self.model.load_state_dict(torch.load(f'checkpoints/model_{self.train_config.name}.std', weights_only=True))
+                    self.optimizer.load_state_dict(torch.load(f'checkpoints/optim_{self.train_config.name}.std', weights_only=True))
                     lr_scheduler.step()
                     print(f"Current learning rate: {self.optimizer.state_dict()['param_groups'][0]['lr']}")
             
@@ -177,7 +197,6 @@ class Solver(object):
                 break
 
         self.eval(mode="test", to_print=True)
-
 
 
     
@@ -208,7 +227,8 @@ class Solver(object):
                 v = to_gpu(v)
                 a = to_gpu(a)
                 y = to_gpu(y)
-                l = to_gpu(l)
+                # 修改：不将 l (lengths) 移动到GPU，保持在CPU
+                # l = to_gpu(l)
                 bert_sent = to_gpu(bert_sent)
                 bert_sent_type = to_gpu(bert_sent_type)
                 bert_sent_mask = to_gpu(bert_sent_mask)
@@ -366,8 +386,60 @@ class Solver(object):
         loss += self.loss_recon(self.model.utt_a_recon, self.model.utt_a_orig)
         loss = loss/3.0
         return loss
+    
+    def get_spatiotemporal_loss(self):
+        """
+        计算时空解耦损失 - 确保时间特征和空间特征互相正交
+        """
+        # 获取保存的特征
+        t_temporal = self.model.t_temporal.squeeze(1)  # [batch_size, hidden_dim]
+        t_spatial = self.model.t_spatial.squeeze(1)
+        v_temporal = self.model.v_temporal.squeeze(1)
+        v_spatial = self.model.v_spatial.squeeze(1)
+        a_temporal = self.model.a_temporal.squeeze(1)
+        a_spatial = self.model.a_spatial.squeeze(1)
+        
+        # 计算每个模态内的时间特征和空间特征的正交损失
+        loss_t = self._compute_orthogonal_loss(t_temporal, t_spatial)
+        loss_v = self._compute_orthogonal_loss(v_temporal, v_spatial)
+        loss_a = self._compute_orthogonal_loss(a_temporal, a_spatial)
+        
+        return (loss_t + loss_v + loss_a) / 3.0
 
+    def _compute_orthogonal_loss(self, feature1, feature2):
+        """
+        计算两个特征之间的正交损失
+        """
+        # 归一化特征
+        feature1_norm = F.normalize(feature1, p=2, dim=1)
+        feature2_norm = F.normalize(feature2, p=2, dim=1)
+        
+        # 计算内积
+        cross = torch.abs(torch.sum(feature1_norm * feature2_norm, dim=1))
+        
+        # 正交损失 - 内积越小越好
+        return torch.mean(cross)
 
-
-
-
+    def get_modal_alignment_loss(self):
+        """
+        计算模态对齐损失 - 确保不同模态间的时间特征和空间特征对齐
+        """
+        # 获取保存的特征
+        t_temporal = self.model.t_temporal.squeeze(1)  # [batch_size, hidden_dim]
+        t_spatial = self.model.t_spatial.squeeze(1)
+        v_temporal = self.model.v_temporal.squeeze(1)
+        v_spatial = self.model.v_spatial.squeeze(1)
+        a_temporal = self.model.a_temporal.squeeze(1)
+        a_spatial = self.model.a_spatial.squeeze(1)
+        
+        # 计算不同模态间时间特征的对齐损失
+        temporal_loss = self.loss_cmd(t_temporal, v_temporal, 5)
+        temporal_loss += self.loss_cmd(t_temporal, a_temporal, 5)
+        temporal_loss += self.loss_cmd(v_temporal, a_temporal, 5)
+        
+        # 计算不同模态间空间特征的对齐损失
+        spatial_loss = self.loss_cmd(t_spatial, v_spatial, 5)
+        spatial_loss += self.loss_cmd(t_spatial, a_spatial, 5)
+        spatial_loss += self.loss_cmd(v_spatial, a_spatial, 5)
+        
+        return (temporal_loss + spatial_loss) / 6.0
