@@ -129,11 +129,13 @@ class Solver(object):
                     y = y.squeeze()
 
                 cls_loss = criterion(y_tilde, y)
-                diff_loss = self.get_diff_loss()
+                diff_loss = self.get_diff_loss()  
                 domain_loss = self.get_domain_loss()
                 recon_loss = self.get_recon_loss()
-                cmd_loss = self.get_cmd_loss()
-                
+                cmd_loss = self.get_minimal_improved_cmd_loss()
+                # 选择使用哪种增强的CMD损失
+                #enhanced_cmd_loss = self.get_enhanced_cmd_loss()
+
                 # 计算新增损失
                 st_loss = self.get_spatiotemporal_loss()  # 时空解耦损失
                 modal_align_loss = self.get_modal_alignment_loss()  # 模态对齐损失
@@ -345,18 +347,33 @@ class Solver(object):
 
         return self.domain_loss_criterion(domain_pred, domain_true)
 
-    def get_cmd_loss(self,):
-
+    def get_minimal_improved_cmd_loss(self):
+        
+        #最小化改动的CMD损失改进
+        
         if not self.train_config.use_cmd_sim:
             return 0.0
 
-        # losses between shared states
-        loss = self.loss_cmd(self.model.utt_shared_t, self.model.utt_shared_v, 5)
-        loss += self.loss_cmd(self.model.utt_shared_t, self.model.utt_shared_a, 5)
-        loss += self.loss_cmd(self.model.utt_shared_a, self.model.utt_shared_v, 5)
-        loss = loss/3.0
-
-        return loss
+        shared_t = self.model.utt_shared_t
+        shared_v = self.model.utt_shared_v
+        shared_a = self.model.utt_shared_a
+        
+        # 原始CMD损失
+        cmd_loss = self.loss_cmd(shared_t, shared_v, 5)
+        cmd_loss += self.loss_cmd(shared_t, shared_a, 5)
+        cmd_loss += self.loss_cmd(shared_v, shared_a, 5)
+        cmd_loss = cmd_loss / 3.0
+        
+        # 只添加一个简单的特征中心化约束
+        # 鼓励每个模态的共享特征都向相同的中心靠拢
+        center = (shared_t.mean(dim=0) + shared_v.mean(dim=0) + shared_a.mean(dim=0)) / 3.0
+        
+        center_loss = F.mse_loss(shared_t.mean(dim=0), center)
+        center_loss += F.mse_loss(shared_v.mean(dim=0), center)
+        center_loss += F.mse_loss(shared_a.mean(dim=0), center)
+        center_loss = center_loss / 3.0
+        
+        return cmd_loss + 0.2 * center_loss  # 很小的权重
 
     def get_diff_loss(self):
 
@@ -378,7 +395,8 @@ class Solver(object):
         loss += self.loss_diff(private_t, private_v)
 
         return loss
-    
+
+
     def get_recon_loss(self, ):
 
         loss = self.loss_recon(self.model.utt_t_recon, self.model.utt_t_orig)
