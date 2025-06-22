@@ -16,13 +16,14 @@ username = Path.home().name
 project_dir = Path(__file__).resolve().parent.parent
 sdk_dir = project_dir.joinpath('CMU-MultimodalSDK')
 #data_dir = project_dir.joinpath('datasets')
-data_dir = Path("/root/autodl-tmp/datasets") # 替换为你的实际路径
+data_dir = Path("/root/autodl-tmp/datasets")  # 替换为你的实际路径
 data_dict = {'mosi': data_dir.joinpath('MOSI'), 'mosei': data_dir.joinpath(
     'MOSEI'), 'ur_funny': data_dir.joinpath('UR_FUNNY')}
 optimizer_dict = {'RMSprop': optim.RMSprop, 'Adam': optim.Adam}
 activation_dict = {'elu': nn.ELU, "hardshrink": nn.Hardshrink, "hardtanh": nn.Hardtanh,
                    "leakyrelu": nn.LeakyReLU, "prelu": nn.PReLU, "relu": nn.ReLU, "rrelu": nn.RReLU,
                    "tanh": nn.Tanh}
+
 
 def str2bool(v):
     """string to boolean"""
@@ -32,6 +33,7 @@ def str2bool(v):
         return False
     else:
         raise argparse.ArgumentTypeError('Boolean value expected.')
+
 
 class Config(object):
     def __init__(self, **kwargs):
@@ -59,6 +61,7 @@ class Config(object):
         config_str = 'Configurations\n'
         config_str += pprint.pformat(self.__dict__)
         return config_str
+
 
 def get_config(parse=True, **optional_kwargs):
     """
@@ -110,24 +113,12 @@ def get_config(parse=True, **optional_kwargs):
 
     # Model
     parser.add_argument('--model', type=str,
-                      default='MISA', help='one of {MISA, }')
+                        default='MISA', help='one of {MISA, }')
 
     # Data
     parser.add_argument('--data', type=str, default='mosi')
-    
-    # 新增模态特征提取器选择参数
-    parser.add_argument('--text_extractor', type=str, default='bert', 
-                      help='Text feature extractor: bert or lstm')
-    parser.add_argument('--visual_extractor', type=str, default='lstm', 
-                      help='Visual feature extractor: lstm or tcn')
-    parser.add_argument('--acoustic_extractor', type=str, default='lstm', 
-                      help='Acoustic feature extractor: lstm or tcn')
-    parser.add_argument('--tcn_kernel_size', type=int, default=3,
-                      help='Kernel size for TCN layers')
-    parser.add_argument('--tcn_dropout', type=float, default=0.2,
-                      help='Dropout rate for TCN layers')
-    parser.add_argument('--tcn_layers', type=int, default=2,
-                      help='Number of TCN layers')
+
+    #adding
 
     # Parse arguments
     if parse:
