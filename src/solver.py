@@ -70,7 +70,6 @@ class Solver(object):
                 filter(lambda p: p.requires_grad, self.model.parameters()),
                 lr=self.train_config.learning_rate)
 
-
     @time_desc_decorator('Training Start!')
     def train(self):
         curr_patience = patience = self.train_config.patience
@@ -81,7 +80,6 @@ class Solver(object):
             self.criterion = criterion = nn.CrossEntropyLoss(reduction="mean")
         else: # mosi and mosei are regression datasets
             self.criterion = criterion = nn.MSELoss(reduction="mean")
-
 
         self.domain_loss_criterion = nn.CrossEntropyLoss(reduction="mean")
         self.sp_loss_criterion = nn.CrossEntropyLoss(reduction="mean")
@@ -106,8 +104,8 @@ class Solver(object):
             train_loss_sp = []
             train_loss = []
             # 初始化新损失的跟踪列表
-            train_loss_st = []  
-            train_loss_modal = []
+            epoch_train_loss_st = []  
+            epoch_train_loss_modal = []
             
             for batch in self.train_data_loader:
                 self.model.zero_grad()
@@ -129,13 +127,11 @@ class Solver(object):
                     y = y.squeeze()
 
                 cls_loss = criterion(y_tilde, y)
-                diff_loss = self.get_diff_loss()  
+                diff_loss = self.get_diff_loss()
                 domain_loss = self.get_domain_loss()
                 recon_loss = self.get_recon_loss()
-                cmd_loss = self.get_minimal_improved_cmd_loss()
-                # 选择使用哪种增强的CMD损失
-                #enhanced_cmd_loss = self.get_enhanced_cmd_loss()
-
+                cmd_loss = self.get_cmd_loss()
+                
                 # 计算新增损失
                 st_loss = self.get_spatiotemporal_loss()  # 时空解耦损失
                 modal_align_loss = self.get_modal_alignment_loss()  # 模态对齐损失
@@ -164,14 +160,17 @@ class Solver(object):
                 train_loss.append(loss.item())
                 train_loss_sim.append(similarity_loss.item())
                 # 记录新损失
-                train_loss_st.append(st_loss.item())
-                train_loss_modal.append(modal_align_loss.item())
+                epoch_train_loss_st.append(st_loss.item())
+                epoch_train_loss_modal.append(modal_align_loss.item())
                 
 
             train_losses.append(train_loss)
+            train_loss_st.append(epoch_train_loss_st)
+            train_loss_modal.append(epoch_train_loss_modal)
+            
             # 打印额外的损失信息
             print(f"Training loss: {round(np.mean(train_loss), 4)}")
-            print(f"ST loss: {round(np.mean(train_loss_st), 4)}, Modal loss: {round(np.mean(train_loss_modal), 4)}")
+            print(f"ST loss: {round(np.mean(epoch_train_loss_st), 4)}, Modal loss: {round(np.mean(epoch_train_loss_modal), 4)}")
 
             valid_loss, valid_acc = self.eval(mode="dev")
             
@@ -200,8 +199,6 @@ class Solver(object):
 
         self.eval(mode="test", to_print=True)
 
-
-    
     def eval(self,mode=None, to_print=False):
         assert(mode is not None)
         self.model.eval()
@@ -270,7 +267,6 @@ class Solver(object):
         https://github.com/yaohungt/Multimodal-Transformer/blob/master/src/eval_metrics.py
         """
 
-
         if self.train_config.data == "ur_funny":
             test_preds = np.argmax(y_pred, 1)
             test_truth = y_true
@@ -325,7 +321,6 @@ class Solver(object):
             
             return accuracy_score(binary_truth, binary_preds)
 
-
     def get_domain_loss(self,):
 
         if self.train_config.use_cmd_sim:
@@ -347,33 +342,18 @@ class Solver(object):
 
         return self.domain_loss_criterion(domain_pred, domain_true)
 
-    def get_minimal_improved_cmd_loss(self):
-        
-        #最小化改动的CMD损失改进
-        
+    def get_cmd_loss(self,):
+
         if not self.train_config.use_cmd_sim:
             return 0.0
 
-        shared_t = self.model.utt_shared_t
-        shared_v = self.model.utt_shared_v
-        shared_a = self.model.utt_shared_a
-        
-        # 原始CMD损失
-        cmd_loss = self.loss_cmd(shared_t, shared_v, 5)
-        cmd_loss += self.loss_cmd(shared_t, shared_a, 5)
-        cmd_loss += self.loss_cmd(shared_v, shared_a, 5)
-        cmd_loss = cmd_loss / 3.0
-        
-        # 只添加一个简单的特征中心化约束
-        # 鼓励每个模态的共享特征都向相同的中心靠拢
-        center = (shared_t.mean(dim=0) + shared_v.mean(dim=0) + shared_a.mean(dim=0)) / 3.0
-        
-        center_loss = F.mse_loss(shared_t.mean(dim=0), center)
-        center_loss += F.mse_loss(shared_v.mean(dim=0), center)
-        center_loss += F.mse_loss(shared_a.mean(dim=0), center)
-        center_loss = center_loss / 3.0
-        
-        return cmd_loss + 0.2 * center_loss  # 很小的权重
+        # losses between shared states
+        loss = self.loss_cmd(self.model.utt_shared_t, self.model.utt_shared_v, 5)
+        loss += self.loss_cmd(self.model.utt_shared_t, self.model.utt_shared_a, 5)
+        loss += self.loss_cmd(self.model.utt_shared_a, self.model.utt_shared_v, 5)
+        loss = loss/3.0
+
+        return loss
 
     def get_diff_loss(self):
 
@@ -395,8 +375,7 @@ class Solver(object):
         loss += self.loss_diff(private_t, private_v)
 
         return loss
-
-
+    
     def get_recon_loss(self, ):
 
         loss = self.loss_recon(self.model.utt_t_recon, self.model.utt_t_orig)
