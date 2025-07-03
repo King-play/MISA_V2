@@ -98,6 +98,20 @@ def get_config(parse=True, **optional_kwargs):
                         help='Weight for spatial-temporal orthogonality loss')
     parser.add_argument('--modal_weight', type=float, default=0.3,
                         help='Weight for modal alignment loss')
+    
+    # 新增RTPAS相关参数
+    parser.add_argument('--anchor_weight', type=float, default=0.7,
+                        help='Weight for RTPAS anchor regularization loss')
+    parser.add_argument('--rtpas_gamma', type=float, default=7.0,
+                        help='Temperature parameter for RTPAS')
+    parser.add_argument('--rtpas_lambda_share', type=float, default=0.5,
+                        help='Sharing extent coefficient for RTPAS')
+    parser.add_argument('--rtpas_beta1', type=float, default=0.1,
+                        help='Weight for anchor alignment loss')
+    parser.add_argument('--rtpas_beta2', type=float, default=0.1,
+                        help='Weight for anchor margin loss')
+    parser.add_argument('--rtpas_delta', type=float, default=1.0,
+                        help='Margin parameter for RTPAS')
 
     parser.add_argument('--learning_rate', type=float, default=1e-4)
     parser.add_argument('--optimizer', type=str, default='Adam')
