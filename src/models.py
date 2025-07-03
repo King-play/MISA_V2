@@ -4,6 +4,7 @@ import math
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.autograd import Function
 from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, pad_packed_sequence
 from transformers import BertModel, BertConfig
@@ -23,6 +24,117 @@ def masked_max(tensor, mask, dim):
     neg_inf = torch.zeros_like(tensor)
     neg_inf[~mask] = -math.inf
     return (masked + neg_inf).max(dim=dim)
+
+
+# RTPAS模块
+class PrivateEncoder(nn.Module):
+    """
+    用于每个模态的私有编码器，可以根据实际任务自定义结构
+    """
+    def __init__(self, input_dim, output_dim):
+        super().__init__()
+        # 可替换为更深层的网络结构
+        self.fc = nn.Linear(input_dim, output_dim)
+
+    def forward(self, x):
+        return self.fc(x)
+
+class RealTimePrivateAnchorShare(nn.Module):
+    def __init__(self, input_dims, hidden_dim, gamma=5.0, lambda_share=0.5, beta1=0.1, beta2=0.1, delta=1.0):
+        """
+        input_dims: dict, 如{'T': 768, 'A': 128, 'V': 512}
+        hidden_dim: 私有特征和锚点的维度
+        gamma: 温度参数
+        lambda_share: 互享程度系数
+        beta1, beta2: 锚点正则各项的权重
+        delta: margin
+        """
+        super().__init__()
+        self.modalities = list(input_dims.keys())
+        self.num_modalities = len(self.modalities)
+        self.hidden_dim = hidden_dim
+        self.gamma = gamma
+        self.lambda_share = lambda_share
+        self.beta1 = beta1
+        self.beta2 = beta2
+        self.delta = delta
+
+        # 每个模态的私有编码器
+        self.private_encoders = nn.ModuleDict({
+            m: PrivateEncoder(input_dims[m], hidden_dim)
+            for m in self.modalities
+        })
+        # 每个模态的可训练锚点
+        self.anchors = nn.ParameterDict({
+            m: nn.Parameter(torch.randn(hidden_dim))
+            for m in self.modalities
+        })
+
+    def forward(self, x_dict):
+        """
+        x_dict: dict, {模态名: 特征向量或张量}
+        返回: 
+            private_shared: dict, {模态名: 动态互享后的特征}
+            anchor_loss: scalar, 锚点正则化损失
+        """
+        # Step1: 计算每个模态的私有特征
+        z = {m: self.private_encoders[m](x_dict[m]) for m in self.modalities}
+        # 标准化方便后续相似度计算
+        z_norm = {m: F.normalize(z[m], p=2, dim=-1) for m in self.modalities}
+        b = {m: F.normalize(self.anchors[m], p=2, dim=-1) for m in self.modalities}
+
+        # Step2: 计算锚点相似度和softmax权重（注意维度一致）
+        s = {}  # s_{m -> n}
+        w = {}  # w_{m -> n}
+        for m in self.modalities:
+            s[m] = {}
+            for n in self.modalities:
+                if n != m:
+                    s[m][n] = torch.sum(z_norm[m] * b[n], dim=-1)  # 余弦相似度
+            # softmax权重
+            sim_list = torch.stack([s[m][n] for n in self.modalities if n != m], dim=-1)  # [batch, num_other_modalities]
+            w_soft = F.softmax(self.gamma * sim_list, dim=-1)
+            for idx, n in enumerate([k for k in self.modalities if k != m]):
+                w[m, n] = w_soft[..., idx]
+
+        # Step3: 实现特征双向动态互享
+        private_shared = {}
+        for m in self.modalities:
+            shared_sum = 0
+            for n in self.modalities:
+                if n != m:
+                    # 这里假设每个样本的权重不同，w[n -> m]与z[n]同batch
+                    shared_sum = shared_sum + w[n, m].unsqueeze(-1) * z[n]
+            private_shared[m] = z[m] + self.lambda_share * shared_sum
+
+        # Step4: 锚点正则化loss
+        # 1) 对齐损失
+        align_loss = torch.stack([F.mse_loss(z[m], self.anchors[m].expand_as(z[m])) for m in self.modalities]).mean()
+        # 2) 互异损失
+        dis_loss = 0
+        for m in self.modalities:
+            dis_sum = 0
+            for n in self.modalities:
+                if n != m:
+                    dis_sum = dis_sum + F.mse_loss(z[m], self.anchors[n].expand_as(z[m]))
+            dis_loss = dis_loss + dis_sum / (self.num_modalities - 1)
+        dis_loss = dis_loss / self.num_modalities  # 注意前面的负号
+
+        # 3) 动态margin损失
+        margin_loss = 0
+        for m in self.modalities:
+            for n in self.modalities:
+                if n != m:
+                    intra = F.mse_loss(z[m], self.anchors[m].expand_as(z[m]), reduction='none').mean(-1)
+                    inter = F.mse_loss(z[m], self.anchors[n].expand_as(z[m]), reduction='none').mean(-1)
+                    margin = F.relu(self.delta + intra - inter)
+                    margin_loss = margin_loss + margin.mean()
+        margin_loss = margin_loss / (self.num_modalities * (self.num_modalities - 1))
+
+        # 4) 锚点总损失
+        anchor_loss = align_loss + self.beta1 * dis_loss + self.beta2 * margin_loss
+
+        return private_shared, anchor_loss
 
 
 # 时空解耦模块
@@ -276,19 +388,17 @@ class MISA(nn.Module):
         self.project_a.add_module('project_a_layer_norm', nn.LayerNorm(config.hidden_size))
 
         ##########################################
-        # private encoders
+        # RTPAS私有编码器 - 替换原有的private encoders
         ##########################################
-        self.private_t = nn.Sequential()
-        self.private_t.add_module('private_t_1', nn.Linear(in_features=config.hidden_size, out_features=config.hidden_size))
-        self.private_t.add_module('private_t_activation_1', nn.Sigmoid())
-        
-        self.private_v = nn.Sequential()
-        self.private_v.add_module('private_v_1', nn.Linear(in_features=config.hidden_size, out_features=config.hidden_size))
-        self.private_v.add_module('private_v_activation_1', nn.Sigmoid())
-        
-        self.private_a = nn.Sequential()
-        self.private_a.add_module('private_a_3', nn.Linear(in_features=config.hidden_size, out_features=config.hidden_size))
-        self.private_a.add_module('private_a_activation_3', nn.Sigmoid())
+        self.rtpas_module = RealTimePrivateAnchorShare(
+            input_dims={'T': config.hidden_size, 'V': config.hidden_size, 'A': config.hidden_size},
+            hidden_dim=config.hidden_size,
+            gamma=config.rtpas_gamma,
+            lambda_share=config.rtpas_lambda_share,
+            beta1=config.rtpas_beta1,
+            beta2=config.rtpas_beta2,
+            delta=config.rtpas_delta
+        )
         
         ##########################################
         # shared encoder
@@ -446,10 +556,16 @@ class MISA(nn.Module):
         self.utt_v_orig = utterance_v = self.project_v(utterance_v)
         self.utt_a_orig = utterance_a = self.project_a(utterance_a)
 
-        # Private-shared components - 私有空间保持不变
-        self.utt_private_t = self.private_t(utterance_t)
-        self.utt_private_v = self.private_v(utterance_v)
-        self.utt_private_a = self.private_a(utterance_a)
+        # 使用RTPAS替换原有私有编码器
+        private_shared, self.anchor_loss = self.rtpas_module({
+            'T': utterance_t,
+            'V': utterance_v, 
+            'A': utterance_a
+        })
+        
+        self.utt_private_t = private_shared['T']
+        self.utt_private_v = private_shared['V']
+        self.utt_private_a = private_shared['A']
 
         # 获取共享空间的原始表示
         shared_t = self.shared(utterance_t)
