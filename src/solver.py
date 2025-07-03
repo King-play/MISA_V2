@@ -95,6 +95,7 @@ class Solver(object):
         # 添加新的损失跟踪列表
         train_loss_st = []  # 时空解耦损失
         train_loss_modal = []  # 模态对齐损失
+        train_loss_anchor = []  # RTPAS锚点损失
         
         for e in range(self.train_config.n_epoch):
             self.model.train()
@@ -106,6 +107,7 @@ class Solver(object):
             # 初始化新损失的跟踪列表
             epoch_train_loss_st = []  
             epoch_train_loss_modal = []
+            epoch_train_loss_anchor = []
             
             for batch in self.train_data_loader:
                 self.model.zero_grad()
@@ -135,6 +137,7 @@ class Solver(object):
                 # 计算新增损失
                 st_loss = self.get_spatiotemporal_loss()  # 时空解耦损失
                 modal_align_loss = self.get_modal_alignment_loss()  # 模态对齐损失
+                anchor_loss = self.get_anchor_loss()  # RTPAS锚点损失
                 
                 if self.train_config.use_cmd_sim:
                     similarity_loss = cmd_loss
@@ -147,7 +150,8 @@ class Solver(object):
                     self.train_config.sim_weight * similarity_loss + \
                     self.train_config.recon_weight * recon_loss + \
                     self.train_config.st_weight * st_loss + \
-                    self.train_config.modal_weight * modal_align_loss
+                    self.train_config.modal_weight * modal_align_loss + \
+                    self.train_config.anchor_weight * anchor_loss
 
                 loss.backward()
                 
@@ -162,15 +166,17 @@ class Solver(object):
                 # 记录新损失
                 epoch_train_loss_st.append(st_loss.item())
                 epoch_train_loss_modal.append(modal_align_loss.item())
+                epoch_train_loss_anchor.append(anchor_loss.item())
                 
 
             train_losses.append(train_loss)
             train_loss_st.append(epoch_train_loss_st)
             train_loss_modal.append(epoch_train_loss_modal)
+            train_loss_anchor.append(epoch_train_loss_anchor)
             
             # 打印额外的损失信息
             print(f"Training loss: {round(np.mean(train_loss), 4)}")
-            print(f"ST loss: {round(np.mean(epoch_train_loss_st), 4)}, Modal loss: {round(np.mean(epoch_train_loss_modal), 4)}")
+            print(f"ST loss: {round(np.mean(epoch_train_loss_st), 4)}, Modal loss: {round(np.mean(epoch_train_loss_modal), 4)}, Anchor loss: {round(np.mean(epoch_train_loss_anchor), 4)}")
 
             valid_loss, valid_acc = self.eval(mode="dev")
             
@@ -343,7 +349,7 @@ class Solver(object):
         return self.domain_loss_criterion(domain_pred, domain_true)
 
     def get_cmd_loss(self,):
-
+        
         if not self.train_config.use_cmd_sim:
             return 0.0
 
@@ -440,3 +446,9 @@ class Solver(object):
         spatial_loss += self.loss_cmd(v_spatial, a_spatial, 5)
         
         return (temporal_loss + spatial_loss) / 6.0
+
+    def get_anchor_loss(self):
+        """
+        获取RTPAS的锚点正则化损失
+        """
+        return self.model.anchor_loss
