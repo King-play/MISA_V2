@@ -80,6 +80,10 @@ def get_config(parse=True, **optional_kwargs):
     parser.add_argument('--use_bert', type=str2bool, default=True)
     parser.add_argument('--use_cmd_sim', type=str2bool, default=True)
 
+    # Feature extraction options (新增)
+    parser.add_argument('--use_facet_visual', type=str2bool, default=False, 
+                       help='Use Facet facial action units for visual features')
+
     # Train
     time_now = datetime.now().strftime('%Y-%m-%d_%H:%M:%S')
     parser.add_argument('--name', type=str, default=f"{time_now}")
@@ -93,7 +97,7 @@ def get_config(parse=True, **optional_kwargs):
     parser.add_argument('--sim_weight', type=float, default=1.0)
     parser.add_argument('--sp_weight', type=float, default=0.0)
     parser.add_argument('--recon_weight', type=float, default=1.0)
-    parser.add_argument('--semi_weight', type=float, default=0.5)  # 新增：半公共空间损失权重
+    parser.add_argument('--semi_weight', type=float, default=0.5)  # 半公共空间损失权重
 
     parser.add_argument('--learning_rate', type=float, default=1e-4)
     parser.add_argument('--optimizer', type=str, default='Adam')
@@ -106,6 +110,9 @@ def get_config(parse=True, **optional_kwargs):
     parser.add_argument('--reverse_grad_weight', type=float, default=1.0)
     # Selectin activation from 'elu', "hardshrink", "hardtanh", "leakyrelu", "prelu", "relu", "rrelu", "tanh"
     parser.add_argument('--activation', type=str, default='rrelu')
+
+    # 新增Facet特征维度
+    parser.add_argument('--facet_visual_size', type=int, default=47)
 
     # Model
     parser.add_argument('--model', type=str,
