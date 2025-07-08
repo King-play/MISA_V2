@@ -108,6 +108,25 @@ class MISA(nn.Module):
         
 
         ##########################################
+        # semi-shared encoders (新增)
+        ##########################################
+        # Text-Visual semi-shared encoder
+        self.semi_shared_tv = nn.Sequential()
+        self.semi_shared_tv.add_module('semi_shared_tv_1', nn.Linear(in_features=config.hidden_size, out_features=config.hidden_size))
+        self.semi_shared_tv.add_module('semi_shared_tv_activation_1', nn.Sigmoid())
+        
+        # Text-Audio semi-shared encoder  
+        self.semi_shared_ta = nn.Sequential()
+        self.semi_shared_ta.add_module('semi_shared_ta_1', nn.Linear(in_features=config.hidden_size, out_features=config.hidden_size))
+        self.semi_shared_ta.add_module('semi_shared_ta_activation_1', nn.Sigmoid())
+        
+        # Visual-Audio semi-shared encoder
+        self.semi_shared_va = nn.Sequential()
+        self.semi_shared_va.add_module('semi_shared_va_1', nn.Linear(in_features=config.hidden_size, out_features=config.hidden_size))
+        self.semi_shared_va.add_module('semi_shared_va_activation_1', nn.Sigmoid())
+
+
+        ##########################################
         # shared encoder
         ##########################################
         self.shared = nn.Sequential()
@@ -144,13 +163,32 @@ class MISA(nn.Module):
         self.sp_discriminator = nn.Sequential()
         self.sp_discriminator.add_module('sp_discriminator_layer_1', nn.Linear(in_features=config.hidden_size, out_features=4))
 
+        ##########################################
+        # semi-shared discriminators (新增)
+        ##########################################
+        # 用于判断表示是否属于对应的半公共空间
+        self.semi_discriminator_tv = nn.Sequential()
+        self.semi_discriminator_tv.add_module('semi_discriminator_tv_1', nn.Linear(in_features=config.hidden_size, out_features=config.hidden_size))
+        self.semi_discriminator_tv.add_module('semi_discriminator_tv_activation', self.activation)
+        self.semi_discriminator_tv.add_module('semi_discriminator_tv_2', nn.Linear(in_features=config.hidden_size, out_features=3))  # T, V, A
+
+        self.semi_discriminator_ta = nn.Sequential()
+        self.semi_discriminator_ta.add_module('semi_discriminator_ta_1', nn.Linear(in_features=config.hidden_size, out_features=config.hidden_size))
+        self.semi_discriminator_ta.add_module('semi_discriminator_ta_activation', self.activation)
+        self.semi_discriminator_ta.add_module('semi_discriminator_ta_2', nn.Linear(in_features=config.hidden_size, out_features=3))  # T, V, A
+
+        self.semi_discriminator_va = nn.Sequential()
+        self.semi_discriminator_va.add_module('semi_discriminator_va_1', nn.Linear(in_features=config.hidden_size, out_features=config.hidden_size))
+        self.semi_discriminator_va.add_module('semi_discriminator_va_activation', self.activation)
+        self.semi_discriminator_va.add_module('semi_discriminator_va_2', nn.Linear(in_features=config.hidden_size, out_features=3))  # T, V, A
 
 
+        # 修改融合层以适应新的表示数量 (3 private + 3 semi-shared + 3 shared = 9)
         self.fusion = nn.Sequential()
-        self.fusion.add_module('fusion_layer_1', nn.Linear(in_features=self.config.hidden_size*6, out_features=self.config.hidden_size*3))
+        self.fusion.add_module('fusion_layer_1', nn.Linear(in_features=self.config.hidden_size*9, out_features=self.config.hidden_size*4))
         self.fusion.add_module('fusion_layer_1_dropout', nn.Dropout(dropout_rate))
         self.fusion.add_module('fusion_layer_1_activation', self.activation)
-        self.fusion.add_module('fusion_layer_3', nn.Linear(in_features=self.config.hidden_size*3, out_features= output_size))
+        self.fusion.add_module('fusion_layer_3', nn.Linear(in_features=self.config.hidden_size*4, out_features= output_size))
 
         self.tlayer_norm = nn.LayerNorm((hidden_sizes[0]*2,))
         self.vlayer_norm = nn.LayerNorm((hidden_sizes[1]*2,))
@@ -234,6 +272,34 @@ class MISA(nn.Module):
             self.domain_label_v = None
             self.domain_label_a = None
 
+        # 半公共空间判别器 (新增)
+        # TV半公共空间：T和V应该被识别为相同类别，A应该被识别为不同类别
+        reversed_semi_tv_t = ReverseLayerF.apply(self.utt_semi_shared_tv_t, self.config.reverse_grad_weight)
+        reversed_semi_tv_v = ReverseLayerF.apply(self.utt_semi_shared_tv_v, self.config.reverse_grad_weight)
+        reversed_semi_tv_a = ReverseLayerF.apply(self.utt_semi_shared_ta_a, self.config.reverse_grad_weight)  # 使用A在TA空间的表示
+
+        self.semi_domain_label_tv_t = self.semi_discriminator_tv(reversed_semi_tv_t)
+        self.semi_domain_label_tv_v = self.semi_discriminator_tv(reversed_semi_tv_v)
+        self.semi_domain_label_tv_a = self.semi_discriminator_tv(reversed_semi_tv_a)
+
+        # TA半公共空间
+        reversed_semi_ta_t = ReverseLayerF.apply(self.utt_semi_shared_ta_t, self.config.reverse_grad_weight)
+        reversed_semi_ta_a = ReverseLayerF.apply(self.utt_semi_shared_ta_a, self.config.reverse_grad_weight)
+        reversed_semi_ta_v = ReverseLayerF.apply(self.utt_semi_shared_tv_v, self.config.reverse_grad_weight)  # 使用V在TV空间的表示
+
+        self.semi_domain_label_ta_t = self.semi_discriminator_ta(reversed_semi_ta_t)
+        self.semi_domain_label_ta_a = self.semi_discriminator_ta(reversed_semi_ta_a)
+        self.semi_domain_label_ta_v = self.semi_discriminator_ta(reversed_semi_ta_v)
+
+        # VA半公共空间
+        reversed_semi_va_v = ReverseLayerF.apply(self.utt_semi_shared_va_v, self.config.reverse_grad_weight)
+        reversed_semi_va_a = ReverseLayerF.apply(self.utt_semi_shared_va_a, self.config.reverse_grad_weight)
+        reversed_semi_va_t = ReverseLayerF.apply(self.utt_semi_shared_ta_t, self.config.reverse_grad_weight)  # 使用T在TA空间的表示
+
+        self.semi_domain_label_va_v = self.semi_discriminator_va(reversed_semi_va_v)
+        self.semi_domain_label_va_a = self.semi_discriminator_va(reversed_semi_va_a)
+        self.semi_domain_label_va_t = self.semi_discriminator_va(reversed_semi_va_t)
+
 
         self.shared_or_private_p_t = self.sp_discriminator(self.utt_private_t)
         self.shared_or_private_p_v = self.sp_discriminator(self.utt_private_v)
@@ -243,18 +309,25 @@ class MISA(nn.Module):
         # For reconstruction
         self.reconstruct()
         
-        # 1-LAYER TRANSFORMER FUSION
-        h = torch.stack((self.utt_private_t, self.utt_private_v, self.utt_private_a, self.utt_shared_t, self.utt_shared_v,  self.utt_shared_a), dim=0)
+        # 修改Transformer融合部分以包含半公共表示
+        h = torch.stack((
+            self.utt_private_t, self.utt_private_v, self.utt_private_a,
+            self.utt_semi_shared_tv_t, self.utt_semi_shared_tv_v,
+            self.utt_semi_shared_ta_t, self.utt_semi_shared_ta_a,
+            self.utt_semi_shared_va_v, self.utt_semi_shared_va_a,
+            self.utt_shared_t, self.utt_shared_v, self.utt_shared_a
+        ), dim=0)
         h = self.transformer_encoder(h)
-        h = torch.cat((h[0], h[1], h[2], h[3], h[4], h[5]), dim=1)
+        h = torch.cat((h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], h[8]), dim=1)
         o = self.fusion(h)
         return o
     
     def reconstruct(self,):
 
-        self.utt_t = (self.utt_private_t + self.utt_shared_t)
-        self.utt_v = (self.utt_private_v + self.utt_shared_v)
-        self.utt_a = (self.utt_private_a + self.utt_shared_a)
+        # 修改重构以包含半公共表示
+        self.utt_t = (self.utt_private_t + self.utt_semi_shared_tv_t + self.utt_semi_shared_ta_t + self.utt_shared_t)
+        self.utt_v = (self.utt_private_v + self.utt_semi_shared_tv_v + self.utt_semi_shared_va_v + self.utt_shared_v)
+        self.utt_a = (self.utt_private_a + self.utt_semi_shared_ta_a + self.utt_semi_shared_va_a + self.utt_shared_a)
 
         self.utt_t_recon = self.recon_t(self.utt_t)
         self.utt_v_recon = self.recon_v(self.utt_v)
@@ -269,11 +342,25 @@ class MISA(nn.Module):
         self.utt_a_orig = utterance_a = self.project_a(utterance_a)
 
 
-        # Private-shared components
+        # Private components
         self.utt_private_t = self.private_t(utterance_t)
         self.utt_private_v = self.private_v(utterance_v)
         self.utt_private_a = self.private_a(utterance_a)
 
+        # Semi-shared components (新增)
+        # Text-Visual semi-shared
+        self.utt_semi_shared_tv_t = self.semi_shared_tv(utterance_t)
+        self.utt_semi_shared_tv_v = self.semi_shared_tv(utterance_v)
+        
+        # Text-Audio semi-shared  
+        self.utt_semi_shared_ta_t = self.semi_shared_ta(utterance_t)
+        self.utt_semi_shared_ta_a = self.semi_shared_ta(utterance_a)
+        
+        # Visual-Audio semi-shared
+        self.utt_semi_shared_va_v = self.semi_shared_va(utterance_v)
+        self.utt_semi_shared_va_a = self.semi_shared_va(utterance_a)
+
+        # Fully shared components
         self.utt_shared_t = self.shared(utterance_t)
         self.utt_shared_v = self.shared(utterance_v)
         self.utt_shared_a = self.shared(utterance_a)
