@@ -1,5 +1,6 @@
 import numpy as np
 import random
+import math
 
 import torch
 import torch.nn as nn
@@ -163,6 +164,7 @@ class MISA(nn.Module):
 
         
     def extract_features(self, sequence, lengths, rnn1, rnn2, layer_norm):
+        lengths = lengths.cpu() 
         packed_sequence = pack_padded_sequence(sequence, lengths)
 
         if self.config.rnncell == "lstm":
