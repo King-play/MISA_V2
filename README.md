@@ -29,7 +29,7 @@ conda activate misa-code
 2. Set ```word_emb_path``` in ```config.py``` to [glove file](http://nlp.stanford.edu/data/glove.840B.300d.zip).
 3. Set ```sdk_dir``` to the path of CMU-MultimodalSDK.
 2. ```python train.py --use_facet_visual True --data mosi --name "test_facet" --patience 20```. Replace ```mosi``` with ```mosei``` or ```ur_funny``` for other datasets.
-3. ```python train.py --data mosei --learning_rate 1e-5```
+3. ```python train.py --use_facet_visual True --data mosei --name "test_facet" --learning_rate 1e-5 --facet_visual_size 35```
 
 ### Citation
 
