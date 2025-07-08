@@ -93,6 +93,7 @@ def get_config(parse=True, **optional_kwargs):
     parser.add_argument('--sim_weight', type=float, default=1.0)
     parser.add_argument('--sp_weight', type=float, default=0.0)
     parser.add_argument('--recon_weight', type=float, default=1.0)
+    parser.add_argument('--semi_weight', type=float, default=0.5)  # 新增：半公共空间损失权重
 
     parser.add_argument('--learning_rate', type=float, default=1e-4)
     parser.add_argument('--optimizer', type=str, default='Adam')
