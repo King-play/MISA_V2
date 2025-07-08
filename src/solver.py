@@ -85,6 +85,7 @@ class Solver(object):
 
         self.domain_loss_criterion = nn.CrossEntropyLoss(reduction="mean")
         self.sp_loss_criterion = nn.CrossEntropyLoss(reduction="mean")
+        self.semi_domain_loss_criterion = nn.CrossEntropyLoss(reduction="mean")  # 新增
         self.loss_diff = DiffLoss()
         self.loss_recon = MSE()
         self.loss_cmd = CMD()
@@ -100,6 +101,7 @@ class Solver(object):
             train_loss_cls, train_loss_sim, train_loss_diff = [], [], []
             train_loss_recon = []
             train_loss_sp = []
+            train_loss_semi = []  # 新增
             train_loss = []
             for batch in self.train_data_loader:
                 self.model.zero_grad()
@@ -125,6 +127,7 @@ class Solver(object):
                 domain_loss = self.get_domain_loss()
                 recon_loss = self.get_recon_loss()
                 cmd_loss = self.get_cmd_loss()
+                semi_domain_loss = self.get_semi_domain_loss()  # 新增
                 
                 if self.train_config.use_cmd_sim:
                     similarity_loss = cmd_loss
@@ -134,7 +137,8 @@ class Solver(object):
                 loss = cls_loss + \
                     self.train_config.diff_weight * diff_loss + \
                     self.train_config.sim_weight * similarity_loss + \
-                    self.train_config.recon_weight * recon_loss
+                    self.train_config.recon_weight * recon_loss + \
+                    self.train_config.sim_weight * semi_domain_loss  # 新增半公共域损失
 
                 loss.backward()
                 
@@ -144,6 +148,7 @@ class Solver(object):
                 train_loss_cls.append(cls_loss.item())
                 train_loss_diff.append(diff_loss.item())
                 train_loss_recon.append(recon_loss.item())
+                train_loss_semi.append(semi_domain_loss.item())  # 新增
                 train_loss.append(loss.item())
                 train_loss_sim.append(similarity_loss.item())
                 
@@ -325,18 +330,67 @@ class Solver(object):
 
         return self.domain_loss_criterion(domain_pred, domain_true)
 
+    def get_semi_domain_loss(self,):
+        """
+        半公共空间域对抗损失：
+        - TV半公共：T和V应该无法被区分，A应该能被区分出来
+        - TA半公共：T和A应该无法被区分，V应该能被区分出来  
+        - VA半公共：V和A应该无法被区分，T应该能被区分出来
+        """
+        loss = 0.0
+
+        # TV半公共空间：期望T=0, V=0, A=2（A应该被识别为不同类别）
+        semi_pred_tv = torch.cat((
+            self.model.semi_domain_label_tv_t,  # T
+            self.model.semi_domain_label_tv_v,  # V  
+            self.model.semi_domain_label_tv_a   # A (来自其他空间)
+        ), dim=0)
+        
+        batch_size = self.model.semi_domain_label_tv_t.size(0)
+        semi_true_tv = to_gpu(torch.LongTensor([0]*batch_size + [0]*batch_size + [2]*batch_size))
+        
+        loss += self.semi_domain_loss_criterion(semi_pred_tv, semi_true_tv)
+
+        # TA半公共空间：期望T=0, A=1, V=2
+        semi_pred_ta = torch.cat((
+            self.model.semi_domain_label_ta_t,  # T
+            self.model.semi_domain_label_ta_a,  # A
+            self.model.semi_domain_label_ta_v   # V (来自其他空间)
+        ), dim=0)
+        
+        semi_true_ta = to_gpu(torch.LongTensor([0]*batch_size + [1]*batch_size + [2]*batch_size))
+        
+        loss += self.semi_domain_loss_criterion(semi_pred_ta, semi_true_ta)
+
+        # VA半公共空间：期望V=1, A=1, T=2  
+        semi_pred_va = torch.cat((
+            self.model.semi_domain_label_va_v,  # V
+            self.model.semi_domain_label_va_a,  # A
+            self.model.semi_domain_label_va_t   # T (来自其他空间)
+        ), dim=0)
+        
+        semi_true_va = to_gpu(torch.LongTensor([1]*batch_size + [1]*batch_size + [2]*batch_size))
+        
+        loss += self.semi_domain_loss_criterion(semi_pred_va, semi_true_va)
+
+        return loss / 3.0
+
     def get_cmd_loss(self,):
 
         if not self.train_config.use_cmd_sim:
             return 0.0
 
-        # losses between shared states
+        # 原有的全共享空间相似性损失
         loss = self.loss_cmd(self.model.utt_shared_t, self.model.utt_shared_v, 5)
         loss += self.loss_cmd(self.model.utt_shared_t, self.model.utt_shared_a, 5)
         loss += self.loss_cmd(self.model.utt_shared_a, self.model.utt_shared_v, 5)
-        loss = loss/3.0
-
-        return loss
+        
+        # 半公共空间内部相似性损失
+        loss += self.loss_cmd(self.model.utt_semi_shared_tv_t, self.model.utt_semi_shared_tv_v, 5)
+        loss += self.loss_cmd(self.model.utt_semi_shared_ta_t, self.model.utt_semi_shared_ta_a, 5)
+        loss += self.loss_cmd(self.model.utt_semi_shared_va_v, self.model.utt_semi_shared_va_a, 5)
+        
+        return loss / 6.0
 
     def get_diff_loss(self):
 
@@ -347,15 +401,59 @@ class Solver(object):
         private_v = self.model.utt_private_v
         private_a = self.model.utt_private_a
 
-        # Between private and shared
-        loss = self.loss_diff(private_t, shared_t)
+        # 半公共表示
+        semi_shared_tv_t = self.model.utt_semi_shared_tv_t
+        semi_shared_tv_v = self.model.utt_semi_shared_tv_v
+        semi_shared_ta_t = self.model.utt_semi_shared_ta_t
+        semi_shared_ta_a = self.model.utt_semi_shared_ta_a
+        semi_shared_va_v = self.model.utt_semi_shared_va_v
+        semi_shared_va_a = self.model.utt_semi_shared_va_a
+
+        loss = 0.0
+
+        # 原有的私有-共享差异损失
+        loss += self.loss_diff(private_t, shared_t)
         loss += self.loss_diff(private_v, shared_v)
         loss += self.loss_diff(private_a, shared_a)
 
-        # Across privates
+        # 原有的跨私有差异损失
         loss += self.loss_diff(private_a, private_t)
         loss += self.loss_diff(private_a, private_v)
         loss += self.loss_diff(private_t, private_v)
+
+        # 私有与半公共的差异损失
+        loss += self.loss_diff(private_t, semi_shared_tv_t)
+        loss += self.loss_diff(private_t, semi_shared_ta_t)
+        loss += self.loss_diff(private_v, semi_shared_tv_v)
+        loss += self.loss_diff(private_v, semi_shared_va_v)
+        loss += self.loss_diff(private_a, semi_shared_ta_a)
+        loss += self.loss_diff(private_a, semi_shared_va_a)
+
+        # 全共享与半公共的差异损失
+        loss += self.loss_diff(shared_t, semi_shared_tv_t)
+        loss += self.loss_diff(shared_t, semi_shared_ta_t)
+        loss += self.loss_diff(shared_v, semi_shared_tv_v)
+        loss += self.loss_diff(shared_v, semi_shared_va_v)
+        loss += self.loss_diff(shared_a, semi_shared_ta_a)
+        loss += self.loss_diff(shared_a, semi_shared_va_a)
+
+        # 不同半公共空间之间的差异损失
+        loss += self.loss_diff(semi_shared_tv_t, semi_shared_ta_t)
+        loss += self.loss_diff(semi_shared_tv_v, semi_shared_va_v)
+        loss += self.loss_diff(semi_shared_ta_a, semi_shared_va_a)
+
+        # 新增：不相关模态在半公共空间的差异损失（核心改进）
+        # A不应该在TV半公共空间有表示，通过跨空间差异实现
+        loss += self.loss_diff(semi_shared_tv_t, semi_shared_ta_a)  # TV空间的T vs TA空间的A
+        loss += self.loss_diff(semi_shared_tv_v, semi_shared_va_a)  # TV空间的V vs VA空间的A
+        
+        # V不应该在TA半公共空间有强表示
+        loss += self.loss_diff(semi_shared_ta_t, semi_shared_tv_v)  # TA空间的T vs TV空间的V
+        loss += self.loss_diff(semi_shared_ta_a, semi_shared_va_v)  # TA空间的A vs VA空间的V
+        
+        # T不应该在VA半公共空间有强表示
+        loss += self.loss_diff(semi_shared_va_v, semi_shared_tv_t)  # VA空间的V vs TV空间的T
+        loss += self.loss_diff(semi_shared_va_a, semi_shared_ta_t)  # VA空间的A vs TA空间的T
 
         return loss
     
